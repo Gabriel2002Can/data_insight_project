@@ -2,28 +2,24 @@ import pandas as pd
 import torch
 from sentence_transformers import SentenceTransformer, util
 import os
+from sklearn.ensemble import IsolationForest
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 # 1. Load data
 df = pd.read_csv("food_price_inflation.csv")
 
-# 2. Create much more informative texts (this is the magic)
-def create_rich_text(row):
-    country = row['REF_AREA_LABEL']
-    year = row['TIME_PERIOD'][:4]  # only the year
-    month = row['TIME_PERIOD'][5:7] if len(row['TIME_PERIOD']) > 7 else ""
-    value = float(row['OBS_VALUE'])
-    
-    # Natural sentences the model understands better
-    return f"In {country}, food price inflation was {value:.2f}% in {year}{'-'+month if month else ''}"
+# 2. Converter DF pra lista de textos (correção do erro!)
+texts = df.apply(lambda row: ' '.join(row.astype(str)), axis=1).tolist()  # ← linha corrigida
 
-texts = df.apply(create_rich_text, axis=1).tolist()
-
-# 3. Load model (PyTorch only, not TensorFlow)
-embedder = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")  # or "cuda" if you have a GPU
+# 3. Load model (PyTorch only)
+embedder = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
 
 # 4. Encode ONCE and save (never recalculate)
 cache_file = "corpus_embeddings.pt"
-
 if os.path.exists(cache_file):
     print("Loading embeddings from cache...")
     corpus_embeddings = torch.load(cache_file)
@@ -31,29 +27,59 @@ else:
     print("Generating embeddings (only once)...")
     corpus_embeddings = embedder.encode(
         texts,
-        batch_size=64,           # larger = faster
+        batch_size=64,
         show_progress_bar=True,
         convert_to_tensor=True,
-        normalize_embeddings=True  # helps a lot with cosine similarity
+        normalize_embeddings=True
     )
     torch.save(corpus_embeddings, cache_file)
     print(f"Embeddings saved to {cache_file}")
 
-# 5. Enhanced queries
-queries = [
-    "Which country had the highest food price inflation?",
-    "Which country had the lowest food price inflation since 2001?",
-    "What was the biggest increase in food prices?",
-    "Show me the country with the worst food inflation"
-]
+# ==================== 2. Outliers ====================
+values = df['OBS_VALUE'].values.reshape(-1, 1)
+iso = IsolationForest(contamination=0.01, random_state=42)
+outlier_pred = iso.fit_predict(values)
+outliers = df[outlier_pred == -1]
+print("\nPaíses com inflação EXTREMA (outliers):")
+print(outliers[['REF_AREA_LABEL', 'TIME_PERIOD', 'OBS_VALUE']].head(10))
 
-# 6. Search
-for query in queries:
-    query_emb = embedder.encode(query, convert_to_tensor=True, normalize_embeddings=True)
-    scores = util.cos_sim(query_emb, corpus_embeddings)[0]
-    topk = torch.topk(scores, k=5)
-    
-    print(f"\nQuery: {query}")
-    print("-" * 60)
-    for score, idx in zip(topk.values, topk.indices):
-        print(f"{score:.4f} → {texts[idx]}")
+# ==================== 3. Top 10 ====================
+print("\nTop 10 maior inflação registrada:")
+print(df.nlargest(10, 'OBS_VALUE')[['REF_AREA_LABEL', 'TIME_PERIOD', 'OBS_VALUE']])
+
+print("\nTop 10 menor inflação (ou deflação):")
+print(df.nsmallest(10, 'OBS_VALUE')[['REF_AREA_LABEL', 'TIME_PERIOD', 'OBS_VALUE']])
+
+# ==================== 4. Clustering ====================
+country_means = df.groupby('REF_AREA_LABEL')['OBS_VALUE'].mean().values.reshape(-1, 1)
+scaler = StandardScaler()
+country_scaled = scaler.fit_transform(country_means)
+kmeans = KMeans(n_clusters=5, random_state=42)
+clusters = kmeans.fit_predict(country_scaled)
+cluster_df = pd.DataFrame({
+    'Country': df['REF_AREA_LABEL'].unique(),
+    'Mean_Inflation': country_means.flatten(),
+    'Cluster': clusters
+}).sort_values('Mean_Inflation', ascending=False)
+print("\nClusters de países por comportamento de inflação:")
+for cluster in cluster_df['Cluster'].unique():
+    countries_in_cluster = cluster_df[cluster_df['Cluster'] == cluster]['Country'].tolist()[:10]
+    mean_inf = cluster_df[cluster_df['Cluster'] == cluster]['Mean_Inflation'].mean()
+    print(f"Cluster {cluster} (média {mean_inf:.2f}%): {', '.join(countries_in_cluster)}")
+
+
+# ==================== 5. Gráfico bonitão ====================
+# Filtro pra remover outliers extremos (hiperinflação >1000%)
+top10 = df.nlargest(10, 'OBS_VALUE')
+top10 = top10[top10['OBS_VALUE'] < 1000]  # ← filtro aqui
+
+plt.figure(figsize=(12, 6))
+sns.barplot(data=top10, x='OBS_VALUE', y='REF_AREA_LABEL', hue='REF_AREA_LABEL', palette='Reds', legend=False)
+plt.title("Top 10 Países com Maior Inflação de Alimentos (2001–2024)")
+plt.xlabel("Inflação (%)")
+plt.xscale('log')  # ← log scale pro eixo x, pra ver diferenças claras
+plt.tight_layout()
+plt.savefig("top10_inflation.png", dpi=200)
+plt.close()
+
+print("\nGráfico salvo em 'top10_inflation.png'!")
