@@ -3,83 +3,137 @@ import torch
 from sentence_transformers import SentenceTransformer, util
 import os
 from sklearn.ensemble import IsolationForest
+import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
-import numpy as np
-import seaborn as sns
 import matplotlib.pyplot as plt
+import seaborn as sns
 
-# 1. Load data
-df = pd.read_csv("food_price_inflation.csv")
+def load_data(path="food_price_inflation.csv"):
+    df = pd.read_csv(path)
+    return df
 
-# 2. Converter DF pra lista de textos (correção do erro!)
-texts = df.apply(lambda row: ' '.join(row.astype(str)), axis=1).tolist()  # ← linha corrigida
+def embed_corpus(df, cache_file="corpus_embeddings.pt"):
+    texts = df.apply(lambda row: ' '.join(row.astype(str)), axis=1).tolist()
 
-# 3. Load model (PyTorch only)
-embedder = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+    if os.path.exists(cache_file):
+        print("Loading cached embeddings...")
+        return torch.load(cache_file)
 
-# 4. Encode ONCE and save (never recalculate)
-cache_file = "corpus_embeddings.pt"
-if os.path.exists(cache_file):
-    print("Loading embeddings from cache...")
-    corpus_embeddings = torch.load(cache_file)
-else:
-    print("Generating embeddings (only once)...")
-    corpus_embeddings = embedder.encode(
+    print("Generating embeddings...")
+    emb = embedder.encode(
         texts,
         batch_size=64,
-        show_progress_bar=True,
         convert_to_tensor=True,
-        normalize_embeddings=True
+        normalize_embeddings=True,
+        show_progress_bar=True
     )
-    torch.save(corpus_embeddings, cache_file)
-    print(f"Embeddings saved to {cache_file}")
+    torch.save(emb, cache_file)
+    return emb
 
-# ==================== 2. Outliers ====================
-values = df['OBS_VALUE'].values.reshape(-1, 1)
-iso = IsolationForest(contamination=0.01, random_state=42)
-outlier_pred = iso.fit_predict(values)
-outliers = df[outlier_pred == -1]
-print("\nPaíses com inflação EXTREMA (outliers):")
-print(outliers[['REF_AREA_LABEL', 'TIME_PERIOD', 'OBS_VALUE']].head(10))
+def detect_intent(query):
+    q_emb = embedder.encode(query, convert_to_tensor=True, normalize_embeddings=True)
+    scores = util.cos_sim(q_emb, intent_embeddings)[0]
+    idx = int(torch.argmax(scores).item())
+    return intent_keys[idx], float(scores[idx])
 
-# ==================== 3. Top 10 ====================
-print("\nTop 10 maior inflação registrada:")
-print(df.nlargest(10, 'OBS_VALUE')[['REF_AREA_LABEL', 'TIME_PERIOD', 'OBS_VALUE']])
+def find_outliers(df):
+    values = df["OBS_VALUE"].astype(float).values.reshape(-1, 1)
+    iso = IsolationForest(contamination=0.01, random_state=42)
+    pred = iso.fit_predict(values)
+    return df[pred == -1]
 
-print("\nTop 10 menor inflação (ou deflação):")
-print(df.nsmallest(10, 'OBS_VALUE')[['REF_AREA_LABEL', 'TIME_PERIOD', 'OBS_VALUE']])
+def get_top_values(df, k=10):
+    return df.nlargest(k, "OBS_VALUE")[["REF_AREA_LABEL", "TIME_PERIOD", "OBS_VALUE"]]
 
-# ==================== 4. Clustering ====================
-country_means = df.groupby('REF_AREA_LABEL')['OBS_VALUE'].mean().values.reshape(-1, 1)
-scaler = StandardScaler()
-country_scaled = scaler.fit_transform(country_means)
-kmeans = KMeans(n_clusters=5, random_state=42)
-clusters = kmeans.fit_predict(country_scaled)
-cluster_df = pd.DataFrame({
-    'Country': df['REF_AREA_LABEL'].unique(),
-    'Mean_Inflation': country_means.flatten(),
-    'Cluster': clusters
-}).sort_values('Mean_Inflation', ascending=False)
-print("\nClusters de países por comportamento de inflação:")
-for cluster in cluster_df['Cluster'].unique():
-    countries_in_cluster = cluster_df[cluster_df['Cluster'] == cluster]['Country'].tolist()[:10]
-    mean_inf = cluster_df[cluster_df['Cluster'] == cluster]['Mean_Inflation'].mean()
-    print(f"Cluster {cluster} (média {mean_inf:.2f}%): {', '.join(countries_in_cluster)}")
+def cluster_countries(df, k=5):
+    country_means = df.groupby("REF_AREA_LABEL")["OBS_VALUE"].mean()
+    scaled = StandardScaler().fit_transform(country_means.values.reshape(-1, 1))
 
+    km = KMeans(n_clusters=k, random_state=42)
+    labels = km.fit_predict(scaled)
 
-# ==================== 5. Gráfico bonitão ====================
-# Filtro pra remover outliers extremos (hiperinflação >1000%)
-top10 = df.nlargest(10, 'OBS_VALUE')
-top10 = top10[top10['OBS_VALUE'] < 1000]  # ← filtro aqui
+    return pd.DataFrame({
+        "Country": country_means.index,
+        "MeanInflation": country_means.values,
+        "Cluster": labels
+    })
 
-plt.figure(figsize=(12, 6))
-sns.barplot(data=top10, x='OBS_VALUE', y='REF_AREA_LABEL', hue='REF_AREA_LABEL', palette='Reds', legend=False)
-plt.title("Top 10 Países com Maior Inflação de Alimentos (2001–2024)")
-plt.xlabel("Inflação (%)")
-plt.xscale('log')  # ← log scale pro eixo x, pra ver diferenças claras
-plt.tight_layout()
-plt.savefig("top10_inflation.png", dpi=200)
-plt.close()
+def plot_top10(df, out_file="top10_inflation.png"):
+    data = df.dropna(subset=["OBS_VALUE"]).nlargest(10, "OBS_VALUE")
 
-print("\nGráfico salvo em 'top10_inflation.png'!")
+    if data.empty:
+        print("No data to plot.")
+        return
+
+    plt.figure(figsize=(12, 6))
+    sns.barplot(data=data, x="OBS_VALUE", y="REF_AREA_LABEL", palette="Reds")
+    plt.title("Top 10 Countries with Highest Food Inflation")
+    plt.xlabel("Inflation (%)")
+    plt.tight_layout()
+    plt.savefig(out_file, dpi=200)
+    plt.close()
+    print(f"Plot saved as {out_file}")
+
+def handle_query(query, df):
+    intent, score = detect_intent(query)
+    print(f"Detected intent: {intent} ({score:.2f})")
+
+    if intent == "outliers":
+        out = find_outliers(df)
+        return {"intent": intent, "result": out}
+
+    if intent == "top":
+        top = get_top_values(df)
+        return {"intent": intent, "result": top}
+
+    if intent == "cluster":
+        cl = cluster_countries(df)
+        return {"intent": intent, "result": cl}
+
+    if intent == "trend":
+        # simplest trend possible
+        df2 = df.copy()
+        df2["t"] = pd.factorize(df2["TIME_PERIOD"])[0]
+
+        from sklearn.linear_model import LinearRegression
+        model = LinearRegression()
+        model.fit(df2[["t"]], df2["OBS_VALUE"])
+        pred = model.predict(df2[["t"]])
+
+        return {
+            "intent": intent,
+            "slope": float(model.coef_[0]),
+            "intercept": float(model.intercept_),
+            "predicted": pred.tolist(),
+        }
+
+    return {"error": "Unknown intent"}
+
+embedder = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+
+INTENTS = {
+    "outliers": "detect outliers, anomalies, isolation forest",
+    "top": "top values, highest values, biggest inflation",
+    "trend": "trend, regression, line going up or down",
+    "cluster": "cluster countries, similar inflation behavior",
+}
+
+intent_embeddings = embedder.encode(
+    list(INTENTS.values()),
+    convert_to_tensor=True,
+    normalize_embeddings=True
+)
+intent_keys = list(INTENTS.keys())
+
+df = load_data()
+corpus_emb = embed_corpus(df)
+
+query = "Detect anomalies."
+result = handle_query(query, df)
+
+print(result["result"])
+
+# Example: generate plot
+if result["intent"] == "top":
+    plot_top10(result["result"])
