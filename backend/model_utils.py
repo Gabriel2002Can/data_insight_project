@@ -115,15 +115,15 @@ def handle_query(query, df):
     intent, score = detect_intent(query)
 
     if intent == "outliers":
-        return {"intent": intent, "result": find_outliers(df)}
+        return {"intent": intent, "score": score, "result": find_outliers(df)}
 
     if intent == "top":
-        return {"intent": intent, "result": get_top_values(df)}
+        return {"intent": intent, "score": score, "result": get_top_values(df)}
 
     if intent == "cluster":
-        return {"intent": intent, "result": cluster_countries(df)}
+        return {"intent": intent, "score": score, "result": cluster_countries(df)}
 
     if intent == "trend":
-        return {"intent": intent, **trend_regression(df)}
+        return {"intent": intent, "score": score, **trend_regression(df)}
 
     return {"error": "unknown intent"}
