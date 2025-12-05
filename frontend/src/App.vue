@@ -137,7 +137,6 @@ function getBarHeight(value, allValues) {
   <div class="app-container">
     <div class="main-content">
       <header class="header">
-        <div class="header-icon">🍎</div>
         <h1 class="title">Food Inflation Insights</h1>
         <p class="subtitle">Ask questions about food prices and inflation trends</p>
       </header>
@@ -385,12 +384,6 @@ function getBarHeight(value, allValues) {
   text-align: center;
   margin-bottom: 3rem;
   color: white;
-}
-
-.header-icon {
-  font-size: 4rem;
-  margin-bottom: 1rem;
-  animation: bounce 2s infinite;
 }
 
 @keyframes bounce {
@@ -1104,10 +1097,6 @@ function getBarHeight(value, allValues) {
 }
 
 @media (max-width: 480px) {
-  .header-icon {
-    font-size: 3rem;
-  }
-
   .title {
     font-size: 1.5rem;
   }
